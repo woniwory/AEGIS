@@ -102,7 +102,26 @@ SQLCipher 패스프레이즈 도출 과정:
 이후 실행: SharedPreferences에서 읽어 복호화 후 패스프레이즈로 사용
 ```
 
-→ 패스프레이즈 자체가 Android Keystore에 묶여 있어 기기 외부에서 DB를 추출해도 열 수 없다.
+→ 패스프레이즈 자체가 Android Keystore에 묶여 있어 기기 외부에서 DB 파일을 추출해도 열 수 없다.
+
+**왜 추출해도 못 여는가?**
+
+```
+SQLCipher DB를 열려면 패스프레이즈가 필요
+    ↓
+패스프레이즈는 SharedPreferences에 저장되어 있지만 AES-256-GCM으로 암호화된 상태
+    ↓
+그 암호화 키는 Android Keystore 안에만 존재
+    ↓
+Android Keystore 키는 하드웨어(TEE/StrongBox)에 묶여 있어
+물리적으로 해당 기기에서만 복호화 연산이 가능
+    ↓
+adb backup, 루팅 후 파일 복사 등으로 DB + SharedPreferences를
+다른 PC나 다른 기기로 옮겨도 키가 없으므로 복호화 불가
+```
+
+즉 **"DB 파일 + 암호화된 패스프레이즈 + Keystore 키"** 세 가지가 모두 같은 기기에 있어야만 열린다.  
+공격자가 기기를 물리적으로 탈취해서 파일만 뽑아가도 DB 내용을 읽을 수 없다.
 
 ---
 
