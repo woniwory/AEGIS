@@ -5,6 +5,9 @@ import android.content.Context;
 import android.provider.Settings;
 import android.util.Log;
 
+import com.example.logcat.queue.OfflineLogDatabase;
+import com.example.logcat.queue.UploadQueueWorker;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -17,9 +20,17 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * 로그 파일 관리자.
+ * - 로그 항목을 AES-256-GCM(CryptoManager)으로 암호화하여 저장
+ * - 각 항목 기록 시 ForwardHashChain으로 H_i = SHA-256(M_i || H_{i-1}) 갱신
+ * - 파일 크기 초과/긴급 이벤트 시 ServerTransmitter로 전송
+ */
 public class LogHandler {
+
     private static final String TAG = "LogFileManager";
-    private static final long MAX_LOG_FILE_SIZE = 512 * 1024; // 512BYTES
+    private static final long MAX_LOG_FILE_SIZE = 512 * 1024; // 512 KB
+
     private final String filename;
     private final String directoryName;
     private final String hashFileName;
@@ -28,10 +39,12 @@ public class LogHandler {
     private File logFile;
     private File hashFile;
     private File internalDir;
-    private String androidID;
-    private ServerTransmitter serverTransmitter;
+    private final String androidID;
+    private final ServerTransmitter serverTransmitter;
 
-    // 🔹 로그 및 해시 파일을 저장하는 맵과 파일 목록
+    // 전방향 안전 해시 체인 (이 LogHandler 인스턴스 전용)
+    private final ForwardHashChain hashChain;
+
     private final Map<String, File> logFiles = new HashMap<>();
     private final Map<String, File> hashFiles = new HashMap<>();
     private final List<String> logFileNames = new ArrayList<>();
@@ -42,19 +55,13 @@ public class LogHandler {
         this.contentResolver = context.getContentResolver();
         this.serverTransmitter = serverTransmitter;
 
-        /*TODO
-         *  1. 파일명 이름 정하기: 파일, 해시 이름 ( Android_ID_파일명.txt, Android_ID_hash.txt) - OK
-         *  2. 서버로 전송되면 writable하게 설정해서 기기 내부저장소에서는 삭제하도록 하기
-         *  - 링버퍼 크기만큼 차면 전송되도록 하게 하기 (크기가 다 찬 파일만)
-         *  - logcat -c 감지되면 전송하도록 하게 하기
-         *  - 서버 Shutdown되면 전송하도록 하게 하기
-         *  3. Documents/Logs 아래 경로에는 이제 저장안되도록 하기 - OK
-         *  4. ACCESS TIME 계산 인식하도록 하기
-         * */
         androidID = getAndroidID(context, contentResolver);
         this.filename = androidID + "_" + filename;
-        this.directoryName = filename.replace(".txt", ""); // "AntiForensic.txt" → "AntiForensic"
-        this.hashFileName = androidID + "_" + directoryName + "_" + "hash.txt";
+        this.directoryName = filename.replace(".txt", "");
+        this.hashFileName = androidID + "_" + directoryName + "_hash.txt";
+
+        // 로그 타입별 전방향 해시 체인 초기화
+        this.hashChain = new ForwardHashChain(context, directoryName);
 
         logFileNames.add(androidID + "_AntiForensicLog.txt");
         logFileNames.add(androidID + "_AppExecutionLog.txt");
@@ -62,7 +69,6 @@ public class LogHandler {
         logFileNames.add(androidID + "_CallingLog.txt");
         logFileNames.add(androidID + "_MessageLog.txt");
         logFileNames.add(androidID + "_FileLog.txt");
-
 
         hashFileNames.add(androidID + "_AntiForensicLog_hash.txt");
         hashFileNames.add(androidID + "_AppExecutionLog_hash.txt");
@@ -77,74 +83,67 @@ public class LogHandler {
     }
 
     public void initializeLogFile() {
-        // 내부 저장소 경로 설정
         internalDir = new File(context.getFilesDir(), directoryName);
-
         if (!internalDir.exists() && !internalDir.mkdirs()) {
             Log.e(TAG, "Failed to create log directory: " + internalDir.getAbsolutePath());
             return;
         }
-
         logFile = new File(internalDir, filename);
         hashFile = new File(internalDir, hashFileName);
+        createFileIfAbsent(logFile);
+        createFileIfAbsent(hashFile);
 
-        try {
-            if (logFile.createNewFile()) {
-                Log.d(TAG, "✅ 새 로그 파일이 생성됨: " + logFile.getAbsolutePath());
-
-
-            } else {
-                Log.d(TAG, "⚠ 로그 파일이 이미 존재함: " + logFile.getAbsolutePath());
-            }
-        } catch (IOException e) {
-            Log.e(TAG, "❌ 로그 파일 생성 중 오류 발생: " + e.getMessage());
-        }
-
-        try {
-            if (hashFile.createNewFile()) {
-                Log.d(TAG, "✅ 새 로그 파일이 생성됨: " + hashFile.getAbsolutePath());
-            } else {
-                Log.d(TAG, "⚠ 로그 파일이 이미 존재함: " + hashFile.getAbsolutePath());
-            }
-        } catch (IOException e) {
-            Log.e(TAG, "❌ 로그 파일 생성 중 오류 발생: " + e.getMessage());
-        }
-        // 🔹 맵과 목록에 추가
         logFiles.put(filename, logFile);
         hashFiles.put(hashFileName, hashFile);
-
-
 
         applyReadOnly(logFile);
         applyReadOnly(hashFile);
         applyReadOnlyToDirectory(internalDir);
     }
 
+    private void createFileIfAbsent(File f) {
+        try {
+            if (f.createNewFile()) {
+                Log.d(TAG, "Created: " + f.getAbsolutePath());
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "File create error: " + e.getMessage());
+        }
+    }
+
     /**
-     * 로그 메시지를 해당 파일에 추가
+     * 로그 메시지를 파일에 기록.
+     * 메시지는 CryptoManager로 암호화 후 저장하고,
+     * ForwardHashChain으로 체인 해시를 갱신하여 hash file에 기록.
      */
     public void appendToLogFile(String message) {
-        File logFilePath = new File(logFile.getAbsolutePath());
-        // 🔹 파일이 읽기 전용인지 확인하고, 쓰기 가능하도록 설정
         applyWritableToDirectory(internalDir);
         applyWritable(logFile);
 
-        Log.d(TAG, "🔍 logFile: Writable=" + logFile.canWrite() + ", Readable=" + logFile.canRead());
+        try {
+            // 1. AES-256-GCM 암호화 (at-rest)
+            String encryptedLine = CryptoManager.getInstance().encryptString(message) + "\n";
 
-        try (FileOutputStream fos = new FileOutputStream(logFilePath, true)) {
-            fos.write((message).getBytes(StandardCharsets.UTF_8));
-            Log.d(TAG, "INTERNAL!!!! Successfully wrote to log file: " + message);
+            // 2. 파일 쓰기
+            try (FileOutputStream fos = new FileOutputStream(logFile, true)) {
+                fos.write(encryptedLine.getBytes(StandardCharsets.UTF_8));
+            }
+
+            // 3. 전방향 해시 체인 갱신: H_i = SHA-256(M_i || H_{i-1})
+            String newChainHash = hashChain.advance(message);
+            updateHashFile(newChainHash);
+
+            Log.d(TAG, "Logged & chained: " + directoryName);
         } catch (IOException e) {
-            Log.e(TAG, "INTERNAL!!!! Error writing to log file: " + e.getMessage());
+            Log.e(TAG, "appendToLogFile error: " + e.getMessage());
+        } finally {
+            applyReadOnly(logFile);
+            applyReadOnlyToDirectory(internalDir);
         }
-
-        applyReadOnly(logFile);
-        applyReadOnlyToDirectory(internalDir);
     }
 
     public Path getLogFilePath() {
-        File logFilePath = new File(logFile.getAbsolutePath());
-        return Path.of(logFilePath.getPath());
+        return Path.of(logFile.getAbsolutePath());
     }
 
     public String getFilename() {
@@ -152,36 +151,24 @@ public class LogHandler {
     }
 
     public void updateHashFile(String hash) {
-        File hashFilePath = new File(hashFile.getAbsolutePath());
-
-        // 🔹 파일이 읽기 전용인지 확인하고, 쓰기 가능하도록 설정
         applyWritableToDirectory(internalDir);
         applyWritable(hashFile);
-
-        Log.d(TAG, "🔍 hashFile: Writable=" + hashFile.canWrite() + ", Readable=" + hashFile.canRead());
-
-        try (FileOutputStream fos = new FileOutputStream(hashFilePath, false)) {
+        try (FileOutputStream fos = new FileOutputStream(hashFile, false)) {
             fos.write((hash + "\n").getBytes(StandardCharsets.UTF_8));
-            Log.d(TAG, "✅ Successfully wrote hash to file.");
         } catch (IOException e) {
-            Log.e(TAG, "❌ Error writing hash to file: " + e.getMessage());
+            Log.e(TAG, "Hash file write error: " + e.getMessage());
+        } finally {
+            applyReadOnly(hashFile);
+            applyReadOnlyToDirectory(internalDir);
         }
-
-        applyReadOnly(hashFile);
-        applyReadOnlyToDirectory(internalDir);
     }
 
-    /**
-     * 로그 파일 크기가 512KB 이상인지 확인 후 처리
-     */
     public void checkFileSizeAndHandle(String fileName) {
-        File logFile = logFiles.get(fileName);
-        String pureFileName = fileName.replace(".txt", "");
-        String hashFileName = pureFileName + "_hash.txt";
-
-        if (logFile != null && logFile.length() >= MAX_LOG_FILE_SIZE) {
-            Log.d(TAG, "📏 " + fileName + " 파일 크기 초과 (512KB), 서버로 전송 및 삭제 진행");
-            handleFileSizeEvents(fileName + " exceeded 512KB", fileName, hashFileName);
+        File lf = logFiles.get(fileName);
+        if (lf != null && lf.length() >= MAX_LOG_FILE_SIZE) {
+            Log.d(TAG, fileName + " exceeded 512KB, transmitting...");
+            String hashFn = fileName.replace(".txt", "_hash.txt");
+            handleFileSizeEvents(fileName + " exceeded 512KB", fileName, hashFn);
         }
     }
 
@@ -189,187 +176,105 @@ public class LogHandler {
         applyWritableToDirectory(internalDir);
         logFile = new File(internalDir, fileName);
         hashFile = new File(internalDir, hashFileName);
-
-        try {
-            if (logFile.createNewFile()) {
-                Log.d(TAG, "✅ 새 로그 파일이 생성됨: " + logFile.getAbsolutePath());
-
-
-            } else {
-                Log.d(TAG, "⚠ 로그 파일이 이미 존재함: " + logFile.getAbsolutePath());
-            }
-        } catch (IOException e) {
-            Log.e(TAG, "❌ 로그 파일 생성 중 오류 발생: " + e.getMessage());
-        }
-
-        try {
-            if (hashFile.createNewFile()) {
-                Log.d(TAG, "✅ 새 로그 파일이 생성됨: " + hashFile.getAbsolutePath());
-            } else {
-                Log.d(TAG, "⚠ 로그 파일이 이미 존재함: " + hashFile.getAbsolutePath());
-            }
-        } catch (IOException e) {
-            Log.e(TAG, "❌ 로그 파일 생성 중 오류 발생: " + e.getMessage());
-        }
-
+        createFileIfAbsent(logFile);
+        createFileIfAbsent(hashFile);
         applyReadOnly(logFile);
         applyReadOnly(hashFile);
         applyReadOnlyToDirectory(internalDir);
+        hashChain.reset();
     }
 
     /**
-     * 512KB 초과 시에는 해당 파일과 그 파일의 해시 파일만 전송 하도록 함.
+     * 512KB 초과 시 해당 파일만 전송.
      */
     public void handleFileSizeEvents(String eventType, String logFileName, String hashFileName) {
-        Log.d(TAG, "🚨 중요 이벤트 감지됨: " + eventType);
+        Log.d(TAG, "File size event: " + eventType);
+        if (serverTransmitter == null) return;
 
-        if (serverTransmitter == null) {
-            Log.e(TAG, "❌ serverManager가 null입니다! 파일을 서버에 전송할 수 없습니다.");
-            return;
-        }
-
-        CountDownLatch latch = new CountDownLatch(logFileNames.size()); // 모든 파일 처리될 때까지 대기
-
+        CountDownLatch latch = new CountDownLatch(1);
         String logFilePath = internalDir.getParent() + "/" + extractLogName(logFileName);
-        File logFile = new File(logFilePath, logFileName);
+        File lf = new File(logFilePath, logFileName);
+        String expectedHash = logFileName.replace(".txt", "_hash.txt");
+        String hashFilePath = internalDir.getParent() + "/" + extractHashName(expectedHash);
+        File hf = new File(hashFilePath, expectedHash);
 
-            // 대응하는 hashFile 찾기
-        String expectedHashFileName = logFileName.replace(".txt", "_hash.txt"); // 로그 파일명 기반으로 해시 파일명 유추
-        String hashFilePath = internalDir.getParent() + "/" + extractHashName(expectedHashFileName);
-        File hashFile = new File(hashFilePath, expectedHashFileName);
-
-        Log.d(TAG, "📁 로그 파일 경로: " + logFile.getAbsolutePath());
-        Log.d(TAG, "📁 해시 파일 경로: " + hashFile.getAbsolutePath());
-
-        if (logFile.exists() && hashFile.exists()) {
-            // 비동기 파일 전송 후, 완료되면 latch 카운트 감소
-            serverTransmitter.sendFilesAsync(logFile, hashFile, new ServerTransmitter.FileTransferCallback() {
+        if (lf.exists() && hf.exists()) {
+            serverTransmitter.sendFilesAsync(lf, hf, new ServerTransmitter.FileTransferCallback() {
                 @Override
                 public void onSuccess() {
                     deleteLogFiles(logFileName);
-                    deleteHashFiles(expectedHashFileName);
-                    Log.d(TAG, "🗑 " + logFileName + " 및 " + expectedHashFileName + " 삭제 완료");
-                    createNewFile(logFileName, expectedHashFileName);
-                    latch.countDown(); // 전송 완료 시 카운트 감소
+                    deleteHashFiles(expectedHash);
+                    createNewFile(logFileName, expectedHash);
+                    latch.countDown();
                 }
-
                 @Override
                 public void onFailure() {
-                    Log.d(TAG, "❌ " + logFileName + " 및 " + expectedHashFileName + " 파일 전송 실패로 인해 삭제하지 않음");
-                    latch.countDown(); // 실패 시에도 카운트 감소
+                    latch.countDown();
                 }
             });
-
         } else {
-            if (!logFile.exists()) {
-                Log.e(TAG, "❌ " + logFileName + " 전송할 로그 파일 없음");
-            }
-            if (!hashFile.exists()) {
-                    Log.e(TAG, "❌ " + expectedHashFileName + " 전송할 해시 파일 없음");
-            }
-            latch.countDown(); // 파일이 존재하지 않아도 카운트 감소 (무한 대기 방지)
+            latch.countDown();
         }
-
-        Log.d(TAG, "📌 모든 파일 전송 작업 완료됨.");
     }
 
     /**
-     * logcat -c 감지, Shutdown, Reboot 발생 시 모든 파일 전송 및 삭제
+     * logcat -c 감지, Shutdown, Reboot 발생 시 모든 파일 즉시 전송.
      */
     public void handleCriticalEvents(String eventType) {
-        Log.d(TAG, "🚨 중요 이벤트 감지됨: " + eventType);
+        Log.d(TAG, "Critical event: " + eventType);
+        if (serverTransmitter == null) return;
 
-        if (serverTransmitter == null) {
-            Log.e(TAG, "❌ serverManager가 null입니다! 파일을 서버에 전송할 수 없습니다.");
-            return;
-        }
-
-        CountDownLatch latch = new CountDownLatch(logFileNames.size()); // 모든 파일 처리될 때까지 대기
-
+        CountDownLatch latch = new CountDownLatch(logFileNames.size());
         for (String fileName : logFileNames) {
             String logFilePath = internalDir.getParent() + "/" + extractLogName(fileName);
-            File logFile = new File(logFilePath, fileName);
+            File lf = new File(logFilePath, fileName);
+            String expectedHash = fileName.replace(".txt", "_hash.txt");
+            String hashFilePath = internalDir.getParent() + "/" + extractHashName(expectedHash);
+            File hf = new File(hashFilePath, expectedHash);
 
-            // 대응하는 hashFile 찾기
-            String expectedHashFileName = fileName.replace(".txt", "_hash.txt"); // 로그 파일명 기반으로 해시 파일명 유추
-            String hashFilePath = internalDir.getParent() + "/" + extractHashName(expectedHashFileName);
-            File hashFile = new File(hashFilePath, expectedHashFileName);
-
-            Log.d(TAG, "📁 로그 파일 경로: " + logFile.getAbsolutePath());
-            Log.d(TAG, "📁 해시 파일 경로: " + hashFile.getAbsolutePath());
-
-            if (logFile.exists() && hashFile.exists()) {
-                // 비동기 파일 전송 후, 완료되면 latch 카운트 감소
-                serverTransmitter.sendFilesAsync(logFile, hashFile, new ServerTransmitter.FileTransferCallback() {
+            if (lf.exists() && hf.exists()) {
+                serverTransmitter.sendFilesAsync(lf, hf, new ServerTransmitter.FileTransferCallback() {
                     @Override
                     public void onSuccess() {
                         deleteLogFiles(fileName);
-                        deleteHashFiles(expectedHashFileName);
-                        Log.d(TAG, "🗑 " + fileName + " 및 " + expectedHashFileName + " 삭제 완료");
-                        createNewFile(fileName, expectedHashFileName);
-
-                        latch.countDown(); // 전송 완료 시 카운트 감소
+                        deleteHashFiles(expectedHash);
+                        createNewFile(fileName, expectedHash);
+                        latch.countDown();
                     }
-
                     @Override
                     public void onFailure() {
-                        Log.d(TAG, "❌ " + fileName + " 및 " + expectedHashFileName + " 파일 전송 실패로 인해 삭제하지 않음");
-                        latch.countDown(); // 실패 시에도 카운트 감소
+                        latch.countDown();
                     }
                 });
-
             } else {
-                if (!logFile.exists()) {
-                    Log.e(TAG, "❌ " + fileName + " 전송할 로그 파일 없음");
-                }
-                if (!hashFile.exists()) {
-                    Log.e(TAG, "❌ " + expectedHashFileName + " 전송할 해시 파일 없음");
-                }
-                latch.countDown(); // 파일이 존재하지 않아도 카운트 감소 (무한 대기 방지)
+                latch.countDown();
             }
         }
-
         try {
-            latch.await(); // 모든 파일 전송이 완료될 때까지 대기
+            latch.await(30, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            e.printStackTrace();
+            Thread.currentThread().interrupt();
         }
-
-        Log.d(TAG, "📌 모든 파일 전송 작업 완료됨.");
     }
 
-    /**
-     * 해당 로그 파일 삭제
-     */
     public synchronized void deleteLogFiles(String fileName) {
-        File logFile = new File(internalDir.getParent() + "/" + extractLogName(fileName), fileName);
-
-        applyWritableToDirectory(logFile.getParentFile());
-        applyWritable(logFile);  // 🔹 삭제 전 파일을 쓰기 가능하게 변경
-
-        if (logFile.exists() && logFile.delete()) {
-            Log.d(TAG, "🗑 로그 파일 삭제됨: " + fileName);
-        } else {
-            Log.e(TAG, "❌ 로그 파일 삭제 실패: " + fileName);
+        File lf = new File(internalDir.getParent() + "/" + extractLogName(fileName), fileName);
+        applyWritableToDirectory(lf.getParentFile());
+        applyWritable(lf);
+        if (lf.exists() && lf.delete()) {
+            Log.d(TAG, "Deleted log: " + fileName);
         }
-        applyReadOnlyToDirectory(logFile.getParentFile());
+        applyReadOnlyToDirectory(lf.getParentFile());
     }
 
-    /**
-     * 해당 해시 파일 삭제
-     */
     public synchronized void deleteHashFiles(String fileName) {
-        File hashFile = new File(internalDir.getParent() + "/" + extractHashName(fileName), fileName);
-
-        applyWritableToDirectory(hashFile.getParentFile());
-        applyWritable(hashFile);  // 🔹 삭제 전 파일을 쓰기 가능하게 변경
-
-        if (hashFile.exists() && hashFile.delete()) {
-            Log.d(TAG, "🗑 해시 파일 삭제됨: " + fileName);
-        } else {
-            Log.e(TAG, "❌ 해시 파일 삭제 실패: " + fileName);
+        File hf = new File(internalDir.getParent() + "/" + extractHashName(fileName), fileName);
+        applyWritableToDirectory(hf.getParentFile());
+        applyWritable(hf);
+        if (hf.exists() && hf.delete()) {
+            Log.d(TAG, "Deleted hash: " + fileName);
         }
-        applyReadOnlyToDirectory(hashFile.getParentFile());
+        applyReadOnlyToDirectory(hf.getParentFile());
     }
 
     private void applyReadOnly(File file) {
@@ -377,78 +282,42 @@ public class LogHandler {
             file.setReadable(true, false);
             file.setWritable(false, false);
             file.setExecutable(false, false);
-            file.setReadOnly();
-            Log.d(TAG, "🔒 파일이 읽기 전용으로 설정됨: " + file.getAbsolutePath());
         }
     }
 
     private void applyWritable(File file) {
-        if (file.exists()) {
-            boolean writable = file.setWritable(true, false);
-            if (writable) {
-                Log.d(TAG, "✅ 파일이 쓰기 가능하도록 설정됨: " + file.getAbsolutePath());
-            } else {
-                Log.e(TAG, "❌ 파일을 쓰기 가능하게 변경하지 못함! 권한 문제 발생 가능.");
-            }
-        }
+        if (file.exists()) file.setWritable(true, false);
     }
 
-    // 🔹 Apply read-only permissions to the directory (chmod 555)
     private void applyReadOnlyToDirectory(File directory) {
-        if (directory.exists()) {
+        if (directory != null && directory.exists()) {
             directory.setReadable(true, false);
             directory.setWritable(false, false);
             directory.setExecutable(true, false);
-            Log.d(TAG, "🔒 디렉토리가 읽기 전용으로 설정됨: " + directory.getAbsolutePath());
         }
     }
 
     private void applyWritableToDirectory(File directory) {
-        if (directory.exists()) {
-            boolean readable = directory.setReadable(true, false);
-            boolean writable = directory.setWritable(true, false);
-            boolean executable = directory.setExecutable(true, false);
-
-            if (readable && writable && executable) {
-                Log.d(TAG, "✅ 디렉토리가 쓰기 가능하도록 설정됨: " + directory.getAbsolutePath());
-            } else {
-                Log.e(TAG, "❌ 디렉토리 쓰기 가능 설정 실패! 권한 문제 발생 가능: " + directory.getAbsolutePath());
-            }
-        } else {
-            Log.e(TAG, "❌ 디렉토리가 존재하지 않음: " + directory.getAbsolutePath());
+        if (directory != null && directory.exists()) {
+            directory.setReadable(true, false);
+            directory.setWritable(true, false);
+            directory.setExecutable(true, false);
         }
     }
 
     private String extractLogName(String fileName) {
         if (fileName == null) return "";
-
-        int dotIndex = fileName.lastIndexOf(".");
-        if (dotIndex > 0) {
-            fileName = fileName.substring(0, dotIndex);
-        }
-
-        int underscoreIndex = fileName.indexOf("_");
-        if (underscoreIndex != -1) {
-            return fileName.substring(underscoreIndex + 1);
-        }
-        return fileName;
+        int dot = fileName.lastIndexOf(".");
+        if (dot > 0) fileName = fileName.substring(0, dot);
+        int us = fileName.indexOf("_");
+        return us != -1 ? fileName.substring(us + 1) : fileName;
     }
 
     private String extractHashName(String fileName) {
         if (fileName == null) return "";
-
-        int dotIndex = fileName.lastIndexOf(".");
-
-        if (dotIndex > 0) {
-            fileName = fileName.substring(0, dotIndex);
-        }
-
+        int dot = fileName.lastIndexOf(".");
+        if (dot > 0) fileName = fileName.substring(0, dot);
         String[] tokens = fileName.split("_");
-
-        if (tokens.length >= 2) {
-            return tokens[1];
-        } else {
-            return fileName;
-        }
+        return tokens.length >= 2 ? tokens[1] : fileName;
     }
 }

