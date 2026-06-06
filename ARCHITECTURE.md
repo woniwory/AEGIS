@@ -45,12 +45,64 @@ hash.txt 업데이트
 
 ---
 
-## 3. Android 측 — 업로드 트리거
+## 3. Android 측 — 업로드 트리거 및 오프라인 큐 (SQLCipher)
 
 두 가지 조건에서 업로드 실행:
 
 - **512KB 초과** (`checkFileSizeAndHandle`): 해당 로그 파일만 즉시 전송
 - **긴급 이벤트** (`handleCriticalEvents`): `logcat -c` / 종료 / 리부트 감지 시 **모든 로그 파일** 동시 전송
+
+### 비행기 모드 / 네트워크 단절 시 — SQLCipher 오프라인 큐
+
+전송 실패 시 데이터를 유실하지 않도록 암호화된 로컬 SQLite DB에 버퍼링한다.
+
+```
+전송 실패 (네트워크 없음)
+    ↓
+ServerTransmitter.queueOffline()
+    ↓
+CryptoManager.encryptString(logContent)   ← 컬럼 수준 AES-256-GCM 암호화
+    ↓
+OfflineLogDatabase (SQLCipher)에 INSERT
+  테이블: offline_log_queue
+  컬럼: device_id, log_type, encrypted_log_content, chain_hash, retry_count
+    ↓
+UploadQueueWorker.scheduleFlush()         ← WorkManager에 재시도 예약
+  제약: NetworkType.CONNECTED (Wi-Fi/데이터 연결 시에만 실행)
+  정책: KEEP (중복 예약 방지)
+    ↓
+네트워크 복구 시 Worker 자동 실행
+  → CryptoManager.decryptToString(encrypted_log_content)
+  → ServerTransmitter.uploadEncryptedLog() 재시도
+  → 성공: DB에서 삭제 / 실패: retry_count 증가 (MAX 5회 초과 시 영구 삭제)
+```
+
+**DB 파일 위치 (실기기/에뮬레이터)**
+
+```
+/data/data/com.example.logcat/databases/aegis_offline_queue.db
+```
+
+> 확장자는 `.db` (Room 기본값), 디렉터리는 `databases` (복수).  
+> `.sqlite` / `database` (단수)가 아님에 주의.
+
+**이중 암호화 구조**
+
+| 계층 | 방식 | 범위 |
+|------|------|------|
+| 1계층 | SQLCipher AES-256-CBC | DB 파일 전체 (페이지 단위 암호화) |
+| 2계층 | CryptoManager AES-256-GCM | `encrypted_log_content` 컬럼 개별 암호화 |
+
+SQLCipher 패스프레이즈 도출 과정:
+```
+최초 실행: SecureRandom 32바이트 생성
+    → CryptoManager.encryptString() (Android Keystore 키로 암호화)
+    → SharedPreferences에 Base64로 저장
+
+이후 실행: SharedPreferences에서 읽어 복호화 후 패스프레이즈로 사용
+```
+
+→ 패스프레이즈 자체가 Android Keystore에 묶여 있어 기기 외부에서 DB를 추출해도 열 수 없다.
 
 ---
 
@@ -159,6 +211,7 @@ hash.txt 업데이트
 | 재전송 공격 | ephemeral 키 — 매 전송마다 새 세션 키 |
 | 신원 위조 | ECDSA 서명 — 기기 고유 Android Keystore 개인키 |
 | 시간 조작 탐지 | deviceTimestamp vs serverTimestamp 비교 → PDF에 시각화 |
+| 네트워크 단절 중 로그 유실 | SQLCipher 오프라인 큐 — 이중 암호화 후 WorkManager 재시도 |
 
 ---
 
@@ -169,6 +222,9 @@ hash.txt 업데이트
   → AES-GCM 암호화 파일 저장 + ForwardHashChain 갱신
     → 업로드 트리거 (512KB 초과 or 긴급 이벤트)
       → at-rest 복호화 → 해시 재계산 → X25519+AES-GCM E2E 암호화 → POST
-        → 서버 E2E 복호화 → hash 검증 → MongoDB 저장
-          → 분석 요청 → hash 재검증 → PDF 생성
+          ├─ 성공 → 서버 E2E 복호화 → hash 검증 → MongoDB 저장
+          │            → 분석 요청 → hash 재검증 → PDF 생성
+          └─ 실패 (비행기 모드 등)
+               → SQLCipher DB에 AES-GCM 암호화 후 큐잉
+                    → WorkManager (네트워크 복구 감지 시 자동 재전송, 최대 5회)
 ```
