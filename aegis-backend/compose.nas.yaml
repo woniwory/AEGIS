@@ -1,10 +1,9 @@
 version: '3.8'
 
-# NAS 배포용 — Docker Hub private 이미지를 pull해서 실행
+# NAS 배포용 — Docker Hub public 이미지를 pull해서 실행
 # 사용법:
 #   1. cp .env.example .env  →  .env 값 채우기
-#   2. docker login -u cyberswoni   (최초 1회)
-#   3. docker compose -f compose.nas.yaml up -d
+#   2. docker-compose -f compose.nas.yaml up -d
 
 services:
   app:
@@ -20,6 +19,7 @@ services:
       - REPORT_DIR=/app/reports
       - KEY_STORE_DIR=/app/keys
       - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - AEGIS_FIELD_ENC_KEY=${AEGIS_FIELD_ENC_KEY}
     volumes:
       - reports_data:/app/reports
       - keys_data:/app/keys
