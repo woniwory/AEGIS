@@ -347,8 +347,9 @@ public class ServerTransmitter {
     // ──────────────────────────────────────────────
 
     private static final String PREFS_TS = "aegis_ts_cache";
-    private static final String KEY_SERVER_TS = "last_server_ts";   // 마지막 서버 시각 (ms)
-    private static final String KEY_DEVICE_TS = "last_device_ts";   // 그 시점 기기 시각 (ms)
+    private static final String KEY_SERVER_TS = "last_server_ts";        // 마지막 서버 시각 (ms)
+    private static final String KEY_DEVICE_TS = "last_device_ts";        // 그 시점 기기 시각 (ms)
+    private static final String KEY_ELAPSED_REALTIME = "last_elapsed_rt"; // 그 시점 elapsedRealtime (ms)
     private static final java.text.SimpleDateFormat TS_FMT =
             new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault());
 
@@ -423,6 +424,7 @@ public class ServerTransmitter {
             prefs.edit()
                     .putLong(KEY_SERVER_TS, serverMs)
                     .putLong(KEY_DEVICE_TS, System.currentTimeMillis())
+                    .putLong(KEY_ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime())
                     .apply();
         } catch (Exception e) {
             Log.e(TAG, "saveServerTimestampCache failed", e);
@@ -438,18 +440,26 @@ public class ServerTransmitter {
         android.content.SharedPreferences prefs =
                 context.getSharedPreferences(PREFS_TS, android.content.Context.MODE_PRIVATE);
         long lastServerMs = prefs.getLong(KEY_SERVER_TS, -1);
-        long lastDeviceMs = prefs.getLong(KEY_DEVICE_TS, -1);
-        if (lastServerMs < 0 || lastDeviceMs < 0) return null;
+        long lastElapsedRt = prefs.getLong(KEY_ELAPSED_REALTIME, -1);
+        if (lastServerMs < 0) return null;
 
-        long elapsed = System.currentTimeMillis() - lastDeviceMs;
-        long estimatedMs = lastServerMs + elapsed;
-        // 추정값이 현재 기기 시각보다 24시간 이상 과거면 캐시가 오염된 것 → null
-        if (estimatedMs < System.currentTimeMillis() - 24 * 60 * 60 * 1000L) {
-            Log.w(TAG, "getEstimatedServerTimestamp: 추정값이 24h 이상 과거 → 캐시 무효화");
-            context.getSharedPreferences(PREFS_TS, android.content.Context.MODE_PRIVATE)
-                    .edit().clear().apply();
-            return null;
+        // elapsedRealtime 캐시 없음 → 구버전 APK 데이터, last-known 반환
+        if (lastElapsedRt < 0) {
+            Log.w(TAG, "getEstimatedServerTimestamp: elapsedRealtime 캐시 없음 → [last-known]");
+            return "[last-known] " + TS_FMT.format(new java.util.Date(lastServerMs));
         }
+
+        long currentElapsedRt = android.os.SystemClock.elapsedRealtime();
+
+        // 재부팅 감지: 현재 elapsedRealtime이 캐시보다 작으면 재부팅된 것
+        if (currentElapsedRt < lastElapsedRt) {
+            Log.w(TAG, "getEstimatedServerTimestamp: 재부팅 감지 → [last-known]");
+            return "[last-known] " + TS_FMT.format(new java.util.Date(lastServerMs));
+        }
+
+        long elapsedMs = currentElapsedRt - lastElapsedRt;
+        long estimatedMs = lastServerMs + elapsedMs;
+        Log.d(TAG, "getEstimatedServerTimestamp: elapsedMs=" + elapsedMs + "ms → " + TS_FMT.format(new java.util.Date(estimatedMs)));
         return "[estimated] " + TS_FMT.format(new java.util.Date(estimatedMs));
     }
 
