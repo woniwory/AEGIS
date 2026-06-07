@@ -1,14 +1,14 @@
 version: '3.8'
 
-# NAS 배포용 — ghcr.io에서 이미지를 pull해서 실행
+# NAS 배포용 — Docker Hub private 이미지를 pull해서 실행
 # 사용법:
 #   1. cp .env.example .env  →  .env 값 채우기
-#   2. docker login ghcr.io -u <GitHub계정> -p <PAT>
+#   2. docker login -u cyberswoni   (최초 1회)
 #   3. docker compose -f compose.nas.yaml up -d
 
 services:
   app:
-    image: ghcr.io/woniwory/aegis-backend:latest
+    image: cyberswoni/aegis-backend:latest
     container_name: forensic-app
     restart: unless-stopped
     ports:

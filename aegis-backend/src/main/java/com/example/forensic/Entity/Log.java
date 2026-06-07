@@ -25,7 +25,6 @@ public class Log {
     private String hash;
     @CreatedDate
     private LocalDateTime createdAt;
-    @CreatedDate
     private LocalDateTime serverTimestamp;
 
 

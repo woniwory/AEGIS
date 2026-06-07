@@ -50,7 +50,12 @@ public class ClientCryptoPipeline {
     private final String deviceId;
 
     public ClientCryptoPipeline(byte[] serverX25519PublicKeyRaw, String deviceId) {
-        this.serverX25519PublicKeyRaw = serverX25519PublicKeyRaw.clone();
+        if (serverX25519PublicKeyRaw.length == 44) {
+            this.serverX25519PublicKeyRaw = new byte[32];
+            System.arraycopy(serverX25519PublicKeyRaw, 12, this.serverX25519PublicKeyRaw, 0, 32);
+        } else {
+            this.serverX25519PublicKeyRaw = serverX25519PublicKeyRaw.clone();
+        }
         this.deviceId = deviceId;
         ensureSigningKeyExists();
     }

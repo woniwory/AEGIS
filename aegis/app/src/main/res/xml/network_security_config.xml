@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Cleartext HTTP 전면 차단; 모든 통신은 TLS 1.3 전용 -->
+    <!-- 에뮬레이터(10.0.2.2) 및 로컬 개발 서버 HTTP 허용; 프로덕션 배포 시 false로 변경 -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />

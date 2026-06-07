@@ -26,7 +26,7 @@ public class LogRepository {
     // 동적으로 컬렉션 이름을 받아서 deviceId와 logType을 기준으로 로그 조회
     public List<Log> findByDeviceIdAndLogType(String deviceId, String logType) {
         Query query = new Query();
-        query.addCriteria(Criteria.where("logType").is(logType));
+        query.addCriteria(Criteria.where("deviceId").is(deviceId).and("logType").is(logType));
 
         return mongoTemplate.find(query, Log.class);
     }
@@ -37,11 +37,19 @@ public class LogRepository {
     // 특정 deviceId의 로그를 주어진 기간 내에서 조회
 
     public List<Log> findLogsWithinDuration(String deviceId, LocalDateTime startTime, LocalDateTime endTime) {
+        // LocalDateTime과 MongoDB UTC 저장값 간 timezone 불일치를 피하기 위해
+        // DB 쿼리는 deviceId만으로 조회하고, 시간 필터링은 Java 레벨에서 수행
         Query query = new Query();
-        query.addCriteria(Criteria.where("deviceId").is(deviceId)
-                .and("createdAt").gte(startTime).lte(endTime));
+        query.addCriteria(Criteria.where("deviceId").is(deviceId));
+        List<Log> all = mongoTemplate.find(query, Log.class);
 
-        return mongoTemplate.find(query, Log.class);
+        // message의 deviceTimestamp 기준으로 시간 범위 내 로그만 반환
+        return all.stream()
+                .filter(log -> log.getMessage() != null && log.getMessage().stream()
+                        .anyMatch(msg -> msg.getDeviceTimestamp() != null
+                                && !msg.getDeviceTimestamp().isBefore(startTime)
+                                && !msg.getDeviceTimestamp().isAfter(endTime)))
+                .collect(java.util.stream.Collectors.toList());
     }
 
     public List<Log> findAll() {

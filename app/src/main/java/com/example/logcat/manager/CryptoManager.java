@@ -80,14 +80,12 @@ public class CryptoManager {
         byte[] ciphertext = null;
         try {
             SecretKey key = getKey();
-            iv = new byte[GCM_IV_LENGTH];
-            new SecureRandom().nextBytes(iv);
-
             Cipher cipher = Cipher.getInstance(CIPHER_ALGO);
-            cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(GCM_TAG_BITS, iv));
+            cipher.init(Cipher.ENCRYPT_MODE, key);
+            iv = cipher.getIV();
             ciphertext = cipher.doFinal(plaintext);
 
-            ByteBuffer buf = ByteBuffer.allocate(GCM_IV_LENGTH + ciphertext.length);
+            ByteBuffer buf = ByteBuffer.allocate(iv.length + ciphertext.length);
             buf.put(iv);
             buf.put(ciphertext);
             return Base64.encodeToString(buf.array(), Base64.NO_WRAP);
