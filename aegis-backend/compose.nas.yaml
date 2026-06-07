@@ -1,0 +1,63 @@
+version: '3.8'
+
+# NAS 배포용 — ghcr.io에서 이미지를 pull해서 실행
+# 사용법:
+#   1. cp .env.example .env  →  .env 값 채우기
+#   2. docker login ghcr.io -u <GitHub계정> -p <PAT>
+#   3. docker compose -f compose.nas.yaml up -d
+
+services:
+  app:
+    image: ghcr.io/woniwory/aegis-backend:latest
+    container_name: forensic-app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      - SPRING_DATA_MONGODB_URI=mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongodb:27017/${MONGO_DB}?authSource=admin
+      - REPORT_DIR=/app/reports
+      - KEY_STORE_DIR=/app/keys
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+    volumes:
+      - reports_data:/app/reports
+      - keys_data:/app/keys
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - forensic_net
+
+  mongodb:
+    image: mongo:5.0
+    container_name: mongodb_forensic
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MONGO_PORT:-27017}:27017"   # 루프백만 — 외부 노출 차단
+    env_file:
+      - .env
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_DB}
+    volumes:
+      - mongo_data:/data/db
+      - mongo_config:/data/configdb
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - forensic_net
+
+volumes:
+  mongo_data:
+  mongo_config:
+  reports_data:
+  keys_data:
+
+networks:
+  forensic_net:
+    driver: bridge
