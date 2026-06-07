@@ -225,14 +225,12 @@ public class LogHandler {
     public void checkFileSizeAndHandle(String fileName) {
         File lf = logFiles.get(fileName);
         if (lf != null && lf.length() >= MAX_LOG_FILE_SIZE) {
-            Log.d(TAG, fileName + " exceeded 512KB, transmitting...");
-            String hashFn = fileName.replace(".txt", "_hash.txt");
-            handleFileSizeEvents(fileName + " exceeded 512KB", fileName, hashFn);
+            Log.d(TAG, fileName + " exceeded 512KB, triggering send...");
+            new Thread(() -> triggerSendFile(fileName)).start();
         }
     }
 
     private void createNewFile(String fileName, String hashFileName) {
-        // 각 로그 타입의 올바른 디렉터리에 파일 생성 (internalDir이 아닌 파일명 기준)
         String logName = extractLogName(fileName);
         File targetDir = new File(internalDir.getParent(), logName);
         applyWritableToDirectory(targetDir);
@@ -244,7 +242,6 @@ public class LogHandler {
         applyReadOnly(newLog);
         applyReadOnly(newHash);
         applyReadOnlyToDirectory(targetDir);
-        // 이 LogHandler가 소유한 파일일 때만 인스턴스 상태 갱신
         if (fileName.equals(this.filename)) {
             this.logFile = newLog;
             this.hashFile = newHash;
@@ -253,70 +250,110 @@ public class LogHandler {
     }
 
     /**
-     * 512KB 초과 시 해당 파일만 전송.
+     * 단일 로그 파일에 대한 트리거 전송.
+     * 온라인 → 전송 시도 → 실패 시 오프라인 큐
+     * 오프라인 → 즉시 오프라인 큐
+     * 어떤 경우든 .txt는 초기화됨.
      */
-    public void handleFileSizeEvents(String eventType, String logFileName, String hashFileName) {
-        Log.d(TAG, "File size event: " + eventType);
-        if (serverTransmitter == null) return;
-
-        CountDownLatch latch = new CountDownLatch(1);
+    private void triggerSendFile(String logFileName) {
         String logFilePath = internalDir.getParent() + "/" + extractLogName(logFileName);
         File lf = new File(logFilePath, logFileName);
-        String expectedHash = logFileName.replace(".txt", "_hash.txt");
-        String hashFilePath = internalDir.getParent() + "/" + extractHashName(expectedHash);
-        File hf = new File(hashFilePath, expectedHash);
+        if (!lf.exists() || lf.length() == 0) return;
 
-        if (lf.exists() && hf.exists()) {
-            serverTransmitter.sendFilesAsync(lf, hf, new ServerTransmitter.FileTransferCallback() {
-                @Override
-                public void onSuccess() {
-                    deleteLogFiles(logFileName);
-                    deleteHashFiles(expectedHash);
-                    createNewFile(logFileName, expectedHash);
-                    latch.countDown();
-                }
-                @Override
-                public void onFailure() {
-                    latch.countDown();
-                }
-            });
+        String logContent = readAndDecryptContent(lf);
+        if (logContent == null || logContent.isEmpty()) return;
+
+        String contentHash = computeContentHash(logContent);
+        String logType = extractLogName(logFileName);
+        String hashFn = logFileName.replace(".txt", "_hash.txt");
+
+        boolean isOnline = ServerTransmitter.isNetworkAvailable(context);
+        if (isOnline) {
+            Log.d(TAG, "[ONLINE] 전송 시도: " + logType);
+            boolean sent = serverTransmitter.uploadEncryptedLog(androidID, logType, logContent, contentHash);
+            if (sent) {
+                Log.d(TAG, "[ONLINE] 전송 성공: " + logType);
+            } else {
+                Log.w(TAG, "[ONLINE→OFFLINE] 전송 실패, 오프라인 큐 저장: " + logType);
+                serverTransmitter.queueOffline(androidID, logType, logContent, contentHash);
+                UploadQueueWorker.scheduleFlush(context);
+            }
         } else {
-            latch.countDown();
+            Log.d(TAG, "[OFFLINE] 오프라인 큐 저장: " + logType);
+            serverTransmitter.queueOffline(androidID, logType, logContent, contentHash);
+            UploadQueueWorker.scheduleFlush(context);
+        }
+
+        // 온/오프라인 무관하게 .txt 초기화 (큐 or 서버로 넘겼으므로)
+        deleteLogFiles(logFileName);
+        deleteHashFiles(hashFn);
+        createNewFile(logFileName, hashFn);
+    }
+
+    /** 로그 파일을 읽어 각 줄을 복호화한 평문 전체를 반환. */
+    private String readAndDecryptContent(File logFile) {
+        try {
+            applyWritableToDirectory(logFile.getParentFile());
+            applyWritable(logFile);
+            byte[] raw = java.nio.file.Files.readAllBytes(logFile.toPath());
+            applyReadOnly(logFile);
+            applyReadOnlyToDirectory(logFile.getParentFile());
+
+            String rawText = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+            CryptoManager crypto = CryptoManager.getInstance();
+            StringBuilder sb = new StringBuilder();
+            for (String line : rawText.split("\n")) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) continue;
+                try {
+                    sb.append(crypto.decryptToString(trimmed)).append("\n");
+                } catch (Exception ex) {
+                    sb.append(trimmed).append("\n");
+                }
+            }
+            return sb.toString().trim();
+        } catch (Exception e) {
+            Log.e(TAG, "readAndDecryptContent error", e);
+            return null;
+        }
+    }
+
+    /** logContent 문자열의 SHA-256 hex 해시 계산. */
+    private String computeContentHash(String logContent) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            String normalized = String.join("\n",
+                    java.util.Arrays.stream(logContent.split("\\r?\n"))
+                            .collect(java.util.stream.Collectors.toList()));
+            byte[] hashBytes = md.digest(normalized.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hashBytes) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            Log.e(TAG, "SHA-256 not available", e);
+            return "";
         }
     }
 
     /**
-     * logcat -c 감지, Shutdown, Reboot 발생 시 모든 파일 즉시 전송.
+     * 512KB 초과 시 해당 파일만 트리거.
+     */
+    public void handleFileSizeEvents(String eventType, String logFileName, String hashFileName) {
+        Log.d(TAG, "File size event: " + eventType);
+        new Thread(() -> triggerSendFile(logFileName)).start();
+    }
+
+    /**
+     * logcat -c 감지, Shutdown, Reboot 발생 시 모든 파일 즉시 처리.
      */
     public void handleCriticalEvents(String eventType) {
         Log.d(TAG, "Critical event: " + eventType);
-        if (serverTransmitter == null) return;
-
         CountDownLatch latch = new CountDownLatch(logFileNames.size());
         for (String fileName : logFileNames) {
-            String logFilePath = internalDir.getParent() + "/" + extractLogName(fileName);
-            File lf = new File(logFilePath, fileName);
-            String expectedHash = fileName.replace(".txt", "_hash.txt");
-            String hashFilePath = internalDir.getParent() + "/" + extractHashName(expectedHash);
-            File hf = new File(hashFilePath, expectedHash);
-
-            if (lf.exists() && hf.exists() && lf.length() > 0) {
-                serverTransmitter.sendFilesAsync(lf, hf, new ServerTransmitter.FileTransferCallback() {
-                    @Override
-                    public void onSuccess() {
-                        deleteLogFiles(fileName);
-                        deleteHashFiles(expectedHash);
-                        createNewFile(fileName, expectedHash);
-                        latch.countDown();
-                    }
-                    @Override
-                    public void onFailure() {
-                        latch.countDown();
-                    }
-                });
-            } else {
+            new Thread(() -> {
+                triggerSendFile(fileName);
                 latch.countDown();
-            }
+            }).start();
         }
         try {
             latch.await(30, TimeUnit.SECONDS);

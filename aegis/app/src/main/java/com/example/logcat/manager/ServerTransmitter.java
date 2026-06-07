@@ -246,8 +246,17 @@ public class ServerTransmitter {
     // 오프라인 큐 저장
     // ──────────────────────────────────────────────
 
-    private void queueOffline(String deviceId, String logType,
-                               String logContent, String chainHash) {
+    /** 네트워크 연결 여부 확인. */
+    public static boolean isNetworkAvailable(Context context) {
+        android.net.ConnectivityManager cm = (android.net.ConnectivityManager)
+                context.getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) return false;
+        android.net.NetworkInfo ni = cm.getActiveNetworkInfo();
+        return ni != null && ni.isConnected();
+    }
+
+    public void queueOffline(String deviceId, String logType,
+                              String logContent, String chainHash) {
         try {
             String encrypted = CryptoManager.getInstance().encryptString(logContent);
             OfflineLogEntity entity = new OfflineLogEntity(deviceId, logType, encrypted, chainHash);

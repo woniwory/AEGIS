@@ -23,12 +23,10 @@ import androidx.annotation.RequiresPermission;
 import androidx.core.app.NotificationCompat;
 
 import com.example.logcat.R;
-import com.example.logcat.manager.HashGenerator;
 import com.example.logcat.manager.LogHandler;
 import com.example.logcat.manager.ServerTransmitter;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -39,7 +37,6 @@ public class BluetoothLogger extends Service {
     private static final String TAG = "BluetoothLoggingService";
     private String serverTimestamp;
 
-    public HashGenerator hashGenerator;
     private ServerTransmitter serverTransmitter;
     private LogHandler logHandler;
     private BluetoothAdapter bluetoothAdapter;
@@ -105,7 +102,6 @@ public class BluetoothLogger extends Service {
         createNotificationChannel();
         startForeground(1, getNotification("Monitoring Bluetooth connections..."));
 
-        hashGenerator = new HashGenerator();
         bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
         serverTransmitter = new ServerTransmitter(this);
 
@@ -167,20 +163,7 @@ public class BluetoothLogger extends Service {
         String fullMessage = timestamp + message + " ; serverTimestamp: " + serverTimestamp;
 
         logHandler.appendToLogFile(fullMessage + "\n");
-        String chainHash = logHandler.getCurrentChainHash();
-        String deviceId = LogHandler.getAndroidID(this, getContentResolver());
-
-        serverTransmitter.sendLogAsync(deviceId, "BluetoothLog", fullMessage, chainHash,
-            new ServerTransmitter.FileTransferCallback() {
-                @Override
-                public void onSuccess() {
-                    logHandler.clearLogFile();
-                }
-                @Override
-                public void onFailure() {
-                    // 오프라인 큐 적재됨, .txt 유지
-                }
-            });
+        logHandler.checkFileSizeAndHandle(logHandler.getFilename());
     }
 
     private void stopBluetoothMonitoring() {

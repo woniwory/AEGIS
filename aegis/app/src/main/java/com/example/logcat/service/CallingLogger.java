@@ -17,13 +17,11 @@ import android.util.Log;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
-import com.example.logcat.manager.HashGenerator;
 import com.example.logcat.manager.LogHandler;
 import com.example.logcat.manager.ServerTransmitter;
-import com.example.logcat.R; // 리소스 파일
+import com.example.logcat.R;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -42,7 +40,6 @@ public class CallingLogger extends Service {
     private String serverTimestamp;
     private long callStartTime;
     private LogHandler logHandler;
-    private HashGenerator hashGenerator;
     private ServerTransmitter serverTransmitter;
 
     /* TODO: 번호를 해시로 보호 하기 ?
@@ -57,7 +54,6 @@ public class CallingLogger extends Service {
         Notification notification = getNotification();
         startForeground(1, notification);
 
-        hashGenerator = new HashGenerator();
         serverTransmitter = new ServerTransmitter(this);
         logHandler = new LogHandler(this, serverTransmitter,"CallingLog.txt");
         logHandler.initializeLogFile();
@@ -185,20 +181,7 @@ public class CallingLogger extends Service {
         String fullMessage = timestamp + message + " ; serverTimestamp: " + serverTimestamp;
 
         logHandler.appendToLogFile(fullMessage + "\n");
-        String chainHash = logHandler.getCurrentChainHash();
-        String deviceId = LogHandler.getAndroidID(this, getContentResolver());
-
-        serverTransmitter.sendLogAsync(deviceId, "CallingLog", fullMessage, chainHash,
-            new ServerTransmitter.FileTransferCallback() {
-                @Override
-                public void onSuccess() {
-                    logHandler.clearLogFile();
-                }
-                @Override
-                public void onFailure() {
-                    // 오프라인 큐 적재됨, .txt 유지
-                }
-            });
+        logHandler.checkFileSizeAndHandle(logHandler.getFilename());
     }
 
 

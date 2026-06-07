@@ -69,8 +69,8 @@ public class LogService {
      * 4 = transmissionTimestamp 값
      */
     private static final Pattern TIMESTAMP_PATTERN = Pattern.compile(
-        "^(.*?)(?:;\\s*serverTimestamp:\\s*(\\[estimated\\]\\s*)?(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}))?" +
-        "(?:;\\s*transmissionTimestamp:\\s*(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}))?$"
+        "^(.*?)(?:\\s*;\\s*serverTimestamp:\\s*(\\[estimated\\]\\s*)?(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}))?" +
+        "(?:\\s*;\\s*transmissionTimestamp:\\s*(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}))?$"
     );
 
 

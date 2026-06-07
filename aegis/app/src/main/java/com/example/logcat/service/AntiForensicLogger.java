@@ -194,24 +194,9 @@ public class AntiForensicLogger extends Service {
         serverTimestamp = LogHandler.resolveServerTimestamp(this);
         String fullMessage = timestamp + message + " ; serverTimestamp: " + serverTimestamp;
 
-        // 로컬 .txt에 암호화 저장 (해시 체인 갱신 포함)
+        // .txt에 저장 후 512KB 초과 여부 확인 (트리거 기반 전송)
         logHandler.appendToLogFile(fullMessage + "\n");
-        String chainHash = logHandler.getCurrentChainHash();
-        String deviceId = LogHandler.getAndroidID(this, getContentResolver());
-
-        serverTransmitter.sendLogAsync(deviceId, "AntiForensicLog", fullMessage, chainHash,
-            new ServerTransmitter.FileTransferCallback() {
-                @Override
-                public void onSuccess() {
-                    // 온라인: 전송 성공 → .txt 초기화 (누적 불필요)
-                    logHandler.clearLogFile();
-                }
-                @Override
-                public void onFailure() {
-                    // 오프라인: sendLogAsync 내부에서 이미 큐 적재됨
-                    // .txt는 로컬 백업으로 유지
-                }
-            });
+        logHandler.checkFileSizeAndHandle(logHandler.getFilename());
     }
 
 

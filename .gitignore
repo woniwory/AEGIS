@@ -25,3 +25,7 @@ local.properties
 *.db-wal
 *.der
 .env
+
+# Temporary documentation files (do not commit)
+FSI__Digital_Investigation_Summary.md
+AEGIS_Code_Comparison_And_Tasks.md

@@ -12,13 +12,11 @@ import android.provider.MediaStore;
 import android.util.Log;
 
 import com.example.logcat.util.FileActivityDetector;
-import com.example.logcat.manager.HashGenerator;
 import com.example.logcat.manager.LogHandler;
 import com.example.logcat.manager.ServerTransmitter;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -29,7 +27,6 @@ import java.util.Locale;
 public class FileSystemLogger extends Service {
     private static final String TAG = "FileLoggingService";
 
-    private HashGenerator hashGenerator;
     private LogHandler logHandler;
     private ContentObserver mediaStoreObserver;
     private ServerTransmitter serverTransmitter;
@@ -42,7 +39,6 @@ public class FileSystemLogger extends Service {
     public void onCreate() {
         super.onCreate();
 
-        hashGenerator = new HashGenerator();
         serverTransmitter = new ServerTransmitter(this);
         logHandler = new LogHandler(this, serverTransmitter, "FileLog.txt");
         logHandler.initializeLogFile();
@@ -256,19 +252,6 @@ public class FileSystemLogger extends Service {
         String fullMessage = timestamp + " " + message + " ; serverTimestamp: " + serverTimestamp;
 
         logHandler.appendToLogFile(fullMessage + "\n");
-        String chainHash = logHandler.getCurrentChainHash();
-        String deviceId = LogHandler.getAndroidID(this, getContentResolver());
-
-        serverTransmitter.sendLogAsync(deviceId, "FileLog", fullMessage, chainHash,
-            new ServerTransmitter.FileTransferCallback() {
-                @Override
-                public void onSuccess() {
-                    logHandler.clearLogFile();
-                }
-                @Override
-                public void onFailure() {
-                    // 오프라인 큐 적재됨, .txt 유지
-                }
-            });
+        logHandler.checkFileSizeAndHandle(logHandler.getFilename());
     }
 }

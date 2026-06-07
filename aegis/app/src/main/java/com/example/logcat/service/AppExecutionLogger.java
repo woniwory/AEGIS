@@ -5,12 +5,10 @@ import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
-import com.example.logcat.manager.HashGenerator;
 import com.example.logcat.manager.LogHandler;
 import com.example.logcat.manager.ServerTransmitter;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -18,7 +16,6 @@ import java.util.Locale;
 
 public class AppExecutionLogger extends AccessibilityService {
     private static final String TAG = "RunningManager";
-    private HashGenerator hashGenerator;
     private ServerTransmitter serverTransmitter;
     private LogHandler logHandler;
     private String previousForegroundApp = ""; // 이전 포어그라운드 앱 저장
@@ -27,7 +24,6 @@ public class AppExecutionLogger extends AccessibilityService {
     @Override
     public void onCreate() {
         super.onCreate();
-        hashGenerator = new HashGenerator();
         serverTransmitter = new ServerTransmitter(this);
 
         logHandler = new LogHandler(this, serverTransmitter, "AppExecutionLog.txt");
@@ -161,19 +157,6 @@ public class AppExecutionLogger extends AccessibilityService {
         String fullMessage = timestamp + message + " ; serverTimestamp: " + serverTimestamp;
 
         logHandler.appendToLogFile(fullMessage + "\n");
-        String chainHash = logHandler.getCurrentChainHash();
-        String deviceId = LogHandler.getAndroidID(this, getContentResolver());
-
-        serverTransmitter.sendLogAsync(deviceId, "AppExecutionLog", fullMessage, chainHash,
-            new ServerTransmitter.FileTransferCallback() {
-                @Override
-                public void onSuccess() {
-                    logHandler.clearLogFile();
-                }
-                @Override
-                public void onFailure() {
-                    // 오프라인 큐 적재됨, .txt 유지
-                }
-            });
+        logHandler.checkFileSizeAndHandle(logHandler.getFilename());
     }
 }

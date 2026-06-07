@@ -120,20 +120,7 @@ public class MessageLogger extends Service {
                 + " ; serverTimestamp: " + serverTimestamp;
 
         logHandler.appendToLogFile(fullMessage + "\n");
-        String chainHash = logHandler.getCurrentChainHash();
-        String deviceId = LogHandler.getAndroidID(this, getContentResolver());
-
-        serverTransmitter.sendLogAsync(deviceId, "MessageLog", fullMessage, chainHash,
-            new ServerTransmitter.FileTransferCallback() {
-                @Override
-                public void onSuccess() {
-                    logHandler.clearLogFile();
-                }
-                @Override
-                public void onFailure() {
-                    // 오프라인 큐 적재됨, .txt 유지
-                }
-            });
+        logHandler.checkFileSizeAndHandle(logHandler.getFilename());
 
         Log.d(TAG, "SMS logged from: " + sender);
     }
