@@ -178,8 +178,8 @@ public class ServerTransmitter {
         Log.d(TAG, "[SERVERKEY] 서버에서 공개키 요청: " + BASE_URL + SERVERKEY_PATH);
         long t0 = System.currentTimeMillis();
         OkHttpClient keyClient = getHttpClient().newBuilder()
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(10, TimeUnit.SECONDS)
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
                 .build();
         Request req = new Request.Builder()
                 .url(BASE_URL + SERVERKEY_PATH)
