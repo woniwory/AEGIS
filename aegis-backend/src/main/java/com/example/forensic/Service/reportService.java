@@ -316,17 +316,17 @@ public class reportService {
                 timelineTable.addCell(new Cell().add(new Paragraph(wrappedContent))
                         .setBackgroundColor(bgColor).setPadding(5));
 
-                // Server Timestamp (추정값이면 [estimated] 표기)
+                // Server Timestamp (추정값이면 [Offline\nEstimated] 표기)
                 String serverTsStr = "N/A";
                 if (msg.getServerTimestamp() != null) {
-                    serverTsStr = (msg.isEstimatedServerTimestamp() ? "[estimated]\n" : "")
+                    serverTsStr = (msg.isEstimatedServerTimestamp() ? "[Offline\nEstimated]\n" : "")
                             + msg.getServerTimestamp().format(FORMATTER);
                 } else if (msg.getTransmissionTimestamp() != null) {
                     LocalDateTime maxDeviceTs = maxDeviceTsMap.get(msg.getTransmissionTimestamp());
                     if (maxDeviceTs != null) {
                         Duration diff = Duration.between(msg.getDeviceTimestamp(), maxDeviceTs);
                         LocalDateTime estimatedServerTs = msg.getTransmissionTimestamp().minus(diff);
-                        serverTsStr = "[estimated]\n" + estimatedServerTs.format(FORMATTER);
+                        serverTsStr = "[Offline\nEstimated]\n" + estimatedServerTs.format(FORMATTER);
                     }
                 }
                 timelineTable.addCell(new Cell().add(new Paragraph(serverTsStr).setFontSize(9))
