@@ -429,148 +429,125 @@ public class ServerTransmitter {
     }
 
     // ──────────────────────────────────────────────
-    // 서버 타임스탬프
+    // 서버 타임스탬프 (오프셋 방식 통합)
+    //
+    // offset = serverTimeMs - elapsedRealtime() (최초 동기화 시 1회 계산)
+    // logServerTime = elapsedRealtime() + offset  (이후 네트워크 호출 없이 계산)
+    //
+    // 재부팅: elapsedRealtime이 0으로 리셋되므로 offset 무효 → 재동기화 필요
+    // 오프라인 재부팅: lastServerMs + currentElapsedRt 로 추정 ([estimated])
     // ──────────────────────────────────────────────
 
-    private static final String PREFS_TS = "aegis_ts_cache";
-    private static final String KEY_SERVER_TS = "last_server_ts";
-    private static final String KEY_DEVICE_TS = "last_device_ts";
-    private static final String KEY_ELAPSED_REALTIME = "last_elapsed_rt";
+    private static final String PREFS_TS        = "aegis_ts_cache";
+    private static final String KEY_OFFSET_MS   = "ts_offset_ms";      // 오프셋 (ms)
+    private static final String KEY_SYNCED_AT   = "ts_synced_elapsed";  // 오프셋 계산 시점 elapsedRt
+    private static final String KEY_LAST_SERVER = "ts_last_server_ms";  // 마지막 동기화 서버시간 (재부팅 추정용)
+
     private static final java.text.SimpleDateFormat TS_FMT =
             new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault());
 
-    private static volatile String inMemoryTs = null;
-    private static volatile long inMemoryLastAttemptAt = 0;
-    private static volatile long inMemorySuccessServerMs = 0;
-    private static volatile long inMemorySuccessLocalElapsedRt = 0;
-    private static final long TS_CACHE_TTL_MS = 5 * 60_000;       // 성공 시 5분 캐시
-    private static final long TS_RETRY_INTERVAL_MS = 30_000;       // 실패 시 30초 후 재시도
+    // 인메모리 오프셋 — 앱 재시작 전까지 유효
+    private static volatile long tsOffsetMs     = Long.MIN_VALUE;
+    private static volatile long tsSyncedAt     = -1; // elapsedRt at sync time
 
-    public static String getServerTimestamp() {
-        long now = System.currentTimeMillis();
-        long elapsed = now - inMemoryLastAttemptAt;
-        // 성공 캐시: 5분, 실패(null) 캐시: 30초
-        long ttl = (inMemoryTs != null) ? TS_CACHE_TTL_MS : TS_RETRY_INTERVAL_MS;
-        if (elapsed < ttl) {
-            if (inMemorySuccessServerMs > 0 && inMemorySuccessLocalElapsedRt > 0) {
-                long currentElapsedRt = android.os.SystemClock.elapsedRealtime();
-                long elapsedMs = currentElapsedRt - inMemorySuccessLocalElapsedRt;
-                long estimatedMs = inMemorySuccessServerMs + elapsedMs;
-                String estimated = TS_FMT.format(new java.util.Date(estimatedMs));
-                Log.d(TAG, "[TIMESTAMP] 캐시 기반 시간 추정: " + estimated);
-                return estimated;
-            }
-            Log.d(TAG, "[TIMESTAMP] 캐시 사용: " + inMemoryTs
-                    + " (갱신까지 " + (ttl - elapsed) / 1000 + "초)");
-            return inMemoryTs;
+    /**
+     * 온라인/오프라인/재부팅 구분 없이 통합된 서버시각 반환.
+     *
+     * 정상(오프셋 유효):  elapsedRt + offset
+     * 재부팅 후 오프라인: [estimated] lastServerMs + currentElapsedRt
+     * 최초 오프라인:       null
+     */
+    public static String resolveServerTimestamp(android.content.Context context) {
+        long elapsedRt = android.os.SystemClock.elapsedRealtime();
+
+        // 1. 인메모리 오프셋 유효 검사 (재부팅이면 elapsedRt < tsSyncedAt)
+        if (tsOffsetMs != Long.MIN_VALUE && tsSyncedAt >= 0 && elapsedRt >= tsSyncedAt) {
+            String ts = TS_FMT.format(new java.util.Date(elapsedRt + tsOffsetMs));
+            Log.d(TAG, "[TIMESTAMP] 오프셋 계산: " + ts + " (elapsed=" + elapsedRt + "ms)");
+            return ts;
         }
-        inMemoryLastAttemptAt = now;
-        Log.d(TAG, "[TIMESTAMP] 서버에서 타임스탬프 fetch 시작");
 
+        // 2. SharedPrefs에서 오프셋 복원 시도 (앱 재시작, 동일 부팅 세션)
+        android.content.SharedPreferences prefs =
+                context.getSharedPreferences(PREFS_TS, android.content.Context.MODE_PRIVATE);
+        long savedOffset  = prefs.getLong(KEY_OFFSET_MS,   Long.MIN_VALUE);
+        long savedSyncAt  = prefs.getLong(KEY_SYNCED_AT,   -1);
+
+        if (savedOffset != Long.MIN_VALUE && savedSyncAt >= 0 && elapsedRt >= savedSyncAt) {
+            tsOffsetMs  = savedOffset;
+            tsSyncedAt  = savedSyncAt;
+            String ts = TS_FMT.format(new java.util.Date(elapsedRt + tsOffsetMs));
+            Log.d(TAG, "[TIMESTAMP] SharedPrefs 오프셋 복원: " + ts);
+            return ts;
+        }
+
+        // 3. 오프셋 없음 (최초 실행 or 재부팅) — 네트워크로 동기화 시도
+        String fetched = fetchTimestampDirect();
+        if (fetched != null) {
+            try {
+                long serverMs    = TS_FMT.parse(fetched).getTime();
+                long syncElapsed = android.os.SystemClock.elapsedRealtime();
+                tsOffsetMs  = serverMs - syncElapsed;
+                tsSyncedAt  = syncElapsed;
+                prefs.edit()
+                        .putLong(KEY_OFFSET_MS,   tsOffsetMs)
+                        .putLong(KEY_SYNCED_AT,   tsSyncedAt)
+                        .putLong(KEY_LAST_SERVER, serverMs)
+                        .apply();
+                Log.d(TAG, "[TIMESTAMP] 서버 동기화 완료: offset=" + tsOffsetMs + "ms ts=" + fetched);
+                return fetched;
+            } catch (Exception e) {
+                Log.e(TAG, "[TIMESTAMP] 파싱 실패", e);
+            }
+        }
+
+        // 4. 오프라인 재부팅 추정: lastServerMs + currentElapsedRt
+        long lastServerMs = prefs.getLong(KEY_LAST_SERVER, -1);
+        if (lastServerMs > 0) {
+            String estimated = "[estimated] " + TS_FMT.format(new java.util.Date(lastServerMs + elapsedRt));
+            Log.w(TAG, "[TIMESTAMP] 재부팅 후 오프라인 추정: " + estimated);
+            return estimated;
+        }
+
+        Log.w(TAG, "[TIMESTAMP] 타임스탬프 없음 (최초 오프라인)");
+        return null;
+    }
+
+    /** 서버에서 타임스탬프를 직접 fetch (동기, 최대 10초). 실패 시 null. */
+    private static String fetchTimestampDirect() {
+        Log.d(TAG, "[TIMESTAMP] 서버 fetch 시작");
         final String[] result = {null};
         CountDownLatch latch = new CountDownLatch(1);
-
         new Thread(() -> {
             long t0 = System.currentTimeMillis();
             try {
                 URL url = new URL(BASE_URL + TIMESTAMP_PATH);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(5000);
-                int code = conn.getResponseCode();
-                if (code == HttpURLConnection.HTTP_OK) {
-                    BufferedReader reader = new BufferedReader(
+                conn.setConnectTimeout(10_000);
+                conn.setReadTimeout(10_000);
+                if (conn.getResponseCode() == HttpURLConnection.HTTP_OK) {
+                    BufferedReader br = new BufferedReader(
                             new InputStreamReader(conn.getInputStream()));
                     StringBuilder sb = new StringBuilder();
                     String line;
-                    while ((line = reader.readLine()) != null) sb.append(line);
-                    reader.close();
+                    while ((line = br.readLine()) != null) sb.append(line);
+                    br.close();
                     result[0] = sb.toString().trim();
                     Log.d(TAG, "[TIMESTAMP] fetch 성공: " + result[0]
                             + " (" + (System.currentTimeMillis() - t0) + "ms)");
                 } else {
-                    Log.w(TAG, "[TIMESTAMP] 서버 응답 오류: HTTP " + code
-                            + " (" + (System.currentTimeMillis() - t0) + "ms)");
+                    Log.w(TAG, "[TIMESTAMP] 서버 오류: HTTP " + conn.getResponseCode());
                 }
             } catch (Exception e) {
-                Log.w(TAG, "[TIMESTAMP] fetch 실패 (" + (System.currentTimeMillis() - t0) + "ms)"
-                        + " 원인=" + e.getClass().getSimpleName() + ": " + e.getMessage());
+                Log.w(TAG, "[TIMESTAMP] fetch 실패: " + e.getClass().getSimpleName()
+                        + ": " + e.getMessage());
             } finally {
                 latch.countDown();
             }
         }).start();
-
-        try {
-            latch.await(6, TimeUnit.SECONDS);
-        } catch (InterruptedException ignored) {
-        }
-
-        if (result[0] != null) {
-            inMemoryTs = result[0];
-            try {
-                inMemorySuccessServerMs = TS_FMT.parse(inMemoryTs).getTime();
-                inMemorySuccessLocalElapsedRt = android.os.SystemClock.elapsedRealtime();
-            } catch (Exception e) {
-                inMemorySuccessServerMs = 0;
-                inMemorySuccessLocalElapsedRt = 0;
-            }
-        } else {
-            Log.w(TAG, "[TIMESTAMP] 타임스탬프 획득 실패 — null 반환");
-        }
+        try { latch.await(11, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
         return result[0];
-    }
-
-    public static void invalidateTimestampCache() {
-        Log.d(TAG, "[TIMESTAMP] 캐시 무효화 (네트워크 전환 감지)");
-        inMemoryTs = null;
-        inMemoryLastAttemptAt = 0;
-    }
-
-    public static void saveServerTimestampCache(android.content.Context context, String serverTs) {
-        try {
-            long serverMs = TS_FMT.parse(serverTs).getTime();
-            android.content.SharedPreferences prefs =
-                    context.getSharedPreferences(PREFS_TS, android.content.Context.MODE_PRIVATE);
-            prefs.edit()
-                    .putLong(KEY_SERVER_TS, serverMs)
-                    .putLong(KEY_DEVICE_TS, System.currentTimeMillis())
-                    .putLong(KEY_ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime())
-                    .apply();
-            Log.d(TAG, "[TIMESTAMP] SharedPreferences 캐시 저장: " + serverTs);
-        } catch (Exception e) {
-            Log.e(TAG, "[TIMESTAMP] 캐시 저장 실패", e);
-        }
-    }
-
-    public static String getEstimatedServerTimestamp(android.content.Context context) {
-        android.content.SharedPreferences prefs =
-                context.getSharedPreferences(PREFS_TS, android.content.Context.MODE_PRIVATE);
-        long lastServerMs = prefs.getLong(KEY_SERVER_TS, -1);
-        long lastElapsedRt = prefs.getLong(KEY_ELAPSED_REALTIME, -1);
-        if (lastServerMs < 0) {
-            Log.w(TAG, "[TIMESTAMP] 추정 타임스탬프: 캐시 없음 → null 반환");
-            return null;
-        }
-
-        if (lastElapsedRt < 0) {
-            Log.w(TAG, "[TIMESTAMP] 추정 타임스탬프: elapsedRealtime 캐시 없음 → [last-known]");
-            return "[last-known] " + TS_FMT.format(new java.util.Date(lastServerMs));
-        }
-
-        long currentElapsedRt = android.os.SystemClock.elapsedRealtime();
-
-        if (currentElapsedRt < lastElapsedRt) {
-            Log.w(TAG, "[TIMESTAMP] 재부팅 감지 (현재elapsedRt=" + currentElapsedRt
-                    + " < 캐시=" + lastElapsedRt + ") → [last-known]");
-            return "[last-known] " + TS_FMT.format(new java.util.Date(lastServerMs));
-        }
-
-        long elapsedMs = currentElapsedRt - lastElapsedRt;
-        long estimatedMs = lastServerMs + elapsedMs;
-        String estimated = "[estimated] " + TS_FMT.format(new java.util.Date(estimatedMs));
-        Log.d(TAG, "[TIMESTAMP] 추정 타임스탬프: elapsedMs=" + elapsedMs + "ms → " + estimated);
-        return estimated;
     }
 
     public interface FileTransferCallback {

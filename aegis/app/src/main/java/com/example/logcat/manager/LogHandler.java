@@ -93,22 +93,12 @@ public class LogHandler {
     }
 
     /**
-     * 서버 타임스탬프 획득 공통 유틸.
-     * 온라인 성공 시 → 실제 서버 시각 캐싱 후 반환
-     * 오프라인 실패 시 → 캐시 기반 추정값 반환 ([estimated] 접두사)
+     * 서버 타임스탬프 획득 — 오프셋 방식으로 온/오프라인 통합.
+     * 네트워크 호출 없이 elapsedRealtime + offset 으로 계산.
+     * 최초 동기화 또는 재부팅 시에만 서버 fetch 발생.
      */
     public static String resolveServerTimestamp(Context context) {
-        // 오프라인이면 HTTP 요청 자체를 생략
-        if (!ServerTransmitter.isNetworkAvailable(context)) {
-            return ServerTransmitter.getEstimatedServerTimestamp(context);
-        }
-        String ts = ServerTransmitter.getServerTimestamp();
-        if (ts != null) {
-            ServerTransmitter.saveServerTimestampCache(context, ts);
-            return ts;
-        }
-        // 오프라인: 캐시 기반 추정값 반환. 캐시 없으면 null (로그에 serverTimestamp 필드 생략)
-        return ServerTransmitter.getEstimatedServerTimestamp(context);
+        return ServerTransmitter.resolveServerTimestamp(context);
     }
 
     public void initializeLogFile() {
@@ -221,12 +211,9 @@ public class LogHandler {
         CryptoManager crypto = CryptoManager.getInstance();
         boolean anyFailed = false;
 
-        // 플러시 시작 시 인메모리 캐시 무효화 → 신선한 서버 시각 fetch
-        ServerTransmitter.invalidateTimestampCache();
-        String transmissionTs = ServerTransmitter.getServerTimestamp();
+        String transmissionTs = ServerTransmitter.resolveServerTimestamp(context);
         if (transmissionTs != null) {
-            ServerTransmitter.saveServerTimestampCache(context, transmissionTs);
-            Log.d(TAG, "[sendAllPendingTxt] 타임스탬프 캐시 갱신: " + transmissionTs);
+            Log.d(TAG, "[sendAllPendingTxt] transmissionTimestamp: " + transmissionTs);
         }
 
         for (String logType : logTypes) {

@@ -75,13 +75,12 @@ public class UploadQueueWorker extends Worker {
                 Log.d(TAG, "[FLUSH] 복호화 완료: " + (System.currentTimeMillis() - decStart) + "ms"
                         + " contentLen=" + logContent.length());
 
-                String transmissionTs = ServerTransmitter.getServerTimestamp();
+                String transmissionTs = ServerTransmitter.resolveServerTimestamp(ctx);
                 if (transmissionTs != null) {
-                    ServerTransmitter.saveServerTimestampCache(ctx, transmissionTs);
                     logContent = logContent + " ; transmissionTimestamp: " + transmissionTs;
                     Log.d(TAG, "[FLUSH] transmissionTimestamp 추가: " + transmissionTs);
                 } else {
-                    Log.w(TAG, "[FLUSH] transmissionTimestamp 획득 실패 — 타임스탬프 없이 전송");
+                    Log.w(TAG, "[FLUSH] transmissionTimestamp 없음 — 타임스탬프 없이 전송");
                 }
 
                 boolean success = transmitter.uploadEncryptedLog(

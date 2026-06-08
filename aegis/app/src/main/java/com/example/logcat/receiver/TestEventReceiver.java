@@ -55,7 +55,7 @@ public class TestEventReceiver extends BroadcastReceiver {
                 lh.initializeLogFile();
 
                 SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
-                String serverTs = ServerTransmitter.getServerTimestamp();
+                String serverTs = ServerTransmitter.resolveServerTimestamp(context);
 
                 for (String msg : messages) {
                     String ts = sdf.format(new Date());
