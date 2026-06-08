@@ -18,6 +18,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -44,6 +47,13 @@ public class LogHandler {
 
     // 전방향 안전 해시 체인 (이 LogHandler 인스턴스 전용)
     private final ForwardHashChain hashChain;
+
+    // 업로드 직렬화 큐 — 동시 다수 업로드로 인한 서버 timeout 방지
+    private static final ExecutorService uploadExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "aegis-upload");
+        t.setDaemon(true);
+        return t;
+    });
 
     private final Map<String, File> logFiles = new HashMap<>();
     private final Map<String, File> hashFiles = new HashMap<>();
@@ -324,7 +334,7 @@ public class LogHandler {
         File lf = logFiles.get(fileName);
         if (lf != null && lf.length() >= MAX_LOG_FILE_SIZE) {
             Log.d(TAG, fileName + " exceeded 512KB, triggering send...");
-            new Thread(() -> triggerSendFile(fileName)).start();
+            uploadExecutor.submit(() -> triggerSendFile(fileName));
         }
     }
 
@@ -438,26 +448,27 @@ public class LogHandler {
      */
     public void handleFileSizeEvents(String eventType, String logFileName, String hashFileName) {
         Log.d(TAG, "File size event: " + eventType);
-        new Thread(() -> triggerSendFile(logFileName)).start();
+        uploadExecutor.submit(() -> triggerSendFile(logFileName));
     }
 
     /**
      * logcat -c 감지, Shutdown, Reboot 발생 시 모든 파일 즉시 처리.
      */
     public void handleCriticalEvents(String eventType) {
-        Log.d(TAG, "Critical event: " + eventType);
-        CountDownLatch latch = new CountDownLatch(logFileNames.size());
+        Log.d(TAG, "Critical event: " + eventType + " — " + logFileNames.size() + "개 파일 순차 전송 큐 등록");
+        List<Future<?>> futures = new ArrayList<>();
         for (String fileName : logFileNames) {
-            new Thread(() -> {
-                triggerSendFile(fileName);
-                latch.countDown();
-            }).start();
+            futures.add(uploadExecutor.submit(() -> triggerSendFile(fileName)));
         }
-        try {
-            latch.await(30, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        // 모든 전송 완료까지 최대 120초 대기 (순차 처리이므로 파일당 ~20초 × 6개)
+        for (Future<?> f : futures) {
+            try {
+                f.get(120, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                Log.w(TAG, "Critical event 전송 대기 중 예외: " + e.getMessage());
+            }
         }
+        Log.d(TAG, "Critical event 처리 완료: " + eventType);
     }
 
     public synchronized void deleteLogFiles(String fileName) {
