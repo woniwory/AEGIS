@@ -98,7 +98,21 @@ public class LogHandler {
      * 최초 동기화 또는 재부팅 시에만 서버 fetch 발생.
      */
     public static String resolveServerTimestamp(Context context) {
-        return ServerTransmitter.resolveServerTimestamp(context);
+        // 1. SharedPreferences 캐시 기반으로 로컬 추정 시간 계산 (네트워크 호출을 원천 차단하여 ANR 방지)
+        String estimated = ServerTransmitter.getEstimatedServerTimestamp(context);
+        if (estimated != null) {
+            return estimated;
+        }
+
+        // 2. 캐시가 없는 최초 구동 시점에만 온라인인 경우 1회 동기화 시도
+        if (ServerTransmitter.isNetworkAvailable(context)) {
+            String ts = ServerTransmitter.getServerTimestamp();
+            if (ts != null) {
+                ServerTransmitter.saveServerTimestampCache(context, ts);
+                return ts;
+            }
+        }
+        return null;
     }
 
     public void initializeLogFile() {
@@ -252,8 +266,18 @@ public class LogHandler {
                 String hash = hashSb.toString();
 
                 if (transmissionTs != null) {
-                    logContent = logContent + " ; transmissionTimestamp: " + transmissionTs;
-                    normalized = String.join("\n", logContent.split("\\r?\n"));
+                    StringBuilder tempSb = new StringBuilder();
+                    String[] contentLines = logContent.split("\\r?\\n");
+                    for (int i = 0; i < contentLines.length; i++) {
+                        String lineStr = contentLines[i];
+                        if (lineStr.trim().isEmpty()) continue;
+                        tempSb.append(lineStr).append(" ; transmissionTimestamp: ").append(transmissionTs);
+                        if (i < contentLines.length - 1) {
+                            tempSb.append("\n");
+                        }
+                    }
+                    logContent = tempSb.toString();
+                    normalized = String.join("\n", logContent.split("\\r?\\n"));
                     hashBytes = md.digest(normalized.getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     hashSb = new StringBuilder();
                     for (byte b : hashBytes) hashSb.append(String.format("%02x", b));

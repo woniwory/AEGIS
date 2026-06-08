@@ -77,7 +77,17 @@ public class UploadQueueWorker extends Worker {
 
                 String transmissionTs = ServerTransmitter.resolveServerTimestamp(ctx);
                 if (transmissionTs != null) {
-                    logContent = logContent + " ; transmissionTimestamp: " + transmissionTs;
+                    StringBuilder tempSb = new StringBuilder();
+                    String[] contentLines = logContent.split("\\r?\\n");
+                    for (int i = 0; i < contentLines.length; i++) {
+                        String lineStr = contentLines[i];
+                        if (lineStr.trim().isEmpty()) continue;
+                        tempSb.append(lineStr).append(" ; transmissionTimestamp: ").append(transmissionTs);
+                        if (i < contentLines.length - 1) {
+                            tempSb.append("\n");
+                        }
+                    }
+                    logContent = tempSb.toString();
                     Log.d(TAG, "[FLUSH] transmissionTimestamp 추가: " + transmissionTs);
                 } else {
                     Log.w(TAG, "[FLUSH] transmissionTimestamp 없음 — 타임스탬프 없이 전송");

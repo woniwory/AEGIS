@@ -292,6 +292,19 @@ public class reportService {
                     .sorted(timelineComparator)
                     .collect(Collectors.toList());
 
+            // transmissionTimestamp별 가장 늦은 deviceTimestamp 계산 (추정을 위해)
+            Map<LocalDateTime, LocalDateTime> maxDeviceTsMap = new HashMap<>();
+            for (Log log : logs) {
+                for (Message msg : log.getMessage()) {
+                    if (msg.getTransmissionTimestamp() != null) {
+                        LocalDateTime currentMax = maxDeviceTsMap.get(msg.getTransmissionTimestamp());
+                        if (currentMax == null || msg.getDeviceTimestamp().isAfter(currentMax)) {
+                            maxDeviceTsMap.put(msg.getTransmissionTimestamp(), msg.getDeviceTimestamp());
+                        }
+                    }
+                }
+            }
+
             for (MessageWrapper wrapper : allMessagesSorted) {
                 Message msg = wrapper.message;
                 Color bgColor = logTypeColors.getOrDefault(wrapper.logType, new DeviceGray(0.85f));
@@ -308,6 +321,13 @@ public class reportService {
                 if (msg.getServerTimestamp() != null) {
                     serverTsStr = (msg.isEstimatedServerTimestamp() ? "[estimated]\n" : "")
                             + msg.getServerTimestamp().format(FORMATTER);
+                } else if (msg.getTransmissionTimestamp() != null) {
+                    LocalDateTime maxDeviceTs = maxDeviceTsMap.get(msg.getTransmissionTimestamp());
+                    if (maxDeviceTs != null) {
+                        Duration diff = Duration.between(msg.getDeviceTimestamp(), maxDeviceTs);
+                        LocalDateTime estimatedServerTs = msg.getTransmissionTimestamp().minus(diff);
+                        serverTsStr = "[estimated]\n" + estimatedServerTs.format(FORMATTER);
+                    }
                 }
                 timelineTable.addCell(new Cell().add(new Paragraph(serverTsStr).setFontSize(9))
                         .setBackgroundColor(bgColor).setPadding(5));
